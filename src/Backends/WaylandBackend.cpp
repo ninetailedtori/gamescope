@@ -734,7 +734,7 @@ namespace gamescope
         void Wayland_DataSource_Send( struct wl_data_source *pSource, const char *pMime, int nFd );
         void Wayland_DataSource_Cancelled( struct wl_data_source *pSource );
         static const wl_data_source_listener s_DataSourceListener;
-        
+
         void Wayland_DataDevice_DataOffer( struct wl_data_device *pDevice, struct wl_data_offer *pOffer );
         void Wayland_DataDevice_Selection( wl_data_device *pDataDevice, wl_data_offer *pOffer );
         static const wl_data_device_listener s_DataDeviceListener;
@@ -2062,7 +2062,7 @@ namespace gamescope
             xdg_log.errorf( "Failed to initialize input thread" );
             return false;
         }
-        
+
         // Set up the data device listener
         if (m_pDataDeviceManager && !m_pDataDevice) {
             m_pDataDevice = wl_data_device_manager_get_data_device(m_pDataDeviceManager, m_pSeat);
@@ -2735,13 +2735,13 @@ namespace gamescope
             gamescope_set_selection(std::string{}, GAMESCOPE_SELECTION_CLIPBOARD);
             return;
         }
-        
+
         int fds[2];
         if (pipe(fds) < 0) {
             xdg_log.errorf("Failed to create pipe for clipboard data");
             return;
         }
-        
+
         wl_data_offer_receive(pOffer, "text/plain", fds[1]);
         close(fds[1]);
 
