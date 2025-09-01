@@ -734,6 +734,13 @@ namespace gamescope
         void Wayland_DataSource_Send( struct wl_data_source *pSource, const char *pMime, int nFd );
         void Wayland_DataSource_Cancelled( struct wl_data_source *pSource );
         static const wl_data_source_listener s_DataSourceListener;
+        
+        void Wayland_DataDevice_DataOffer( struct wl_data_device *pDevice, struct wl_data_offer *pOffer );
+        void Wayland_DataDevice_Selection( wl_data_device *pDataDevice, wl_data_offer *pOffer );
+        static const wl_data_device_listener s_DataDeviceListener;
+
+        void Wayland_DataOffer_Offer( struct wl_data_offer *pOffer, const char *pMime );
+        static const struct wl_data_offer_listener s_DataOfferListener;
 
         void Wayland_PrimarySelectionSource_Send( struct zwp_primary_selection_source_v1 *pSource, const char *pMime, int nFd );
         void Wayland_PrimarySelectionSource_Cancelled( struct zwp_primary_selection_source_v1 *pSource );
@@ -872,6 +879,13 @@ namespace gamescope
     {
         .send      = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_PrimarySelectionSource_Send ),
         .cancelled = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_PrimarySelectionSource_Cancelled ),
+    };
+    const wl_data_device_listener CWaylandBackend::s_DataDeviceListener = {
+        .data_offer = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_DataDevice_DataOffer ),
+        .selection = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_DataDevice_Selection ),
+    };
+    const wl_data_offer_listener CWaylandBackend::s_DataOfferListener = {
+        .offer = WAYLAND_USERDATA_TO_THIS( CWaylandBackend, Wayland_DataOffer_Offer ),
     };
 
     //////////////////
@@ -1990,13 +2004,14 @@ namespace gamescope
                     return false;
                 if ( !Algorithm::Contains( m_WPColorManagerFeatures.eFeatures, WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES ) )
                     return false;
+                if ( !Algorithm::Contains( m_WPColorManagerFeatures.eFeatures, WP_COLOR_MANAGER_V1_FEATURE_WINDOWS_SCRGB ) )
+                    return false;
 
                 // Transfer Functions
                 if ( !Algorithm::Contains( m_WPColorManagerFeatures.eTransferFunctions, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB ) )
                     return false;
                 if ( !Algorithm::Contains( m_WPColorManagerFeatures.eTransferFunctions, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ ) )
                     return false;
-                // TODO: Need scRGB
 
                 // Primaries
                 if ( !Algorithm::Contains( m_WPColorManagerFeatures.ePrimaries, WP_COLOR_MANAGER_V1_PRIMARIES_SRGB ) )
@@ -2006,6 +2021,22 @@ namespace gamescope
 
                 return true;
             }();
+
+            if ( m_WPColorManagerFeatures.bSupportsGamescopeColorManagement )
+            {
+                // HDR10.
+                {
+                    wp_image_description_creator_params_v1 *pParams = wp_color_manager_v1_create_parametric_creator( m_pWPColorManager );
+                    wp_image_description_creator_params_v1_set_primaries_named( pParams, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020 );
+                    wp_image_description_creator_params_v1_set_tf_named( pParams, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ );
+                    m_pWPImageDescriptions[ GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ ] = wp_image_description_creator_params_v1_create( pParams );
+                }
+
+                // scRGB
+                {
+                    m_pWPImageDescriptions[ GAMESCOPE_APP_TEXTURE_COLORSPACE_SCRGB ] = wp_color_manager_v1_create_windows_scrgb( m_pWPColorManager );
+                }
+            }
         }
 
         m_pLibDecor = libdecor_new( m_pDisplay, &s_LibDecorInterface );
@@ -2030,6 +2061,16 @@ namespace gamescope
         {
             xdg_log.errorf( "Failed to initialize input thread" );
             return false;
+        }
+        
+        // Set up the data device listener
+        if (m_pDataDeviceManager && !m_pDataDevice) {
+            m_pDataDevice = wl_data_device_manager_get_data_device(m_pDataDeviceManager, m_pSeat);
+            if (!m_pDataDevice) {
+                xdg_log.errorf("Failed to get wl_data_device");
+                return false;
+            }
+            wl_data_device_add_listener(m_pDataDevice, &s_DataDeviceListener, this);
         }
 
         return true;
@@ -2089,24 +2130,32 @@ namespace gamescope
         // Prefer opaque for composition on the Wayland backend.
 
         uint32_t u8BitFormat = DRM_FORMAT_INVALID;
-        if ( SupportsFormat( DRM_FORMAT_XRGB8888 ) )
-            u8BitFormat = DRM_FORMAT_XRGB8888;
-        else if ( SupportsFormat( DRM_FORMAT_XBGR8888 ) )
-            u8BitFormat = DRM_FORMAT_XBGR8888;
-        else if ( SupportsFormat( DRM_FORMAT_ARGB8888 ) )
-            u8BitFormat = DRM_FORMAT_ARGB8888;
-        else if ( SupportsFormat( DRM_FORMAT_ABGR8888 ) )
-            u8BitFormat = DRM_FORMAT_ABGR8888;
+        for (int i = 0; i < 2 && u8BitFormat == DRM_FORMAT_INVALID; i++)
+        {
+            bool invalidOnly = i == 0;
+            if ( SupportsFormat( DRM_FORMAT_XRGB8888, invalidOnly ) )
+                u8BitFormat = DRM_FORMAT_XRGB8888;
+            else if ( SupportsFormat( DRM_FORMAT_XBGR8888, invalidOnly ) )
+                u8BitFormat = DRM_FORMAT_XBGR8888;
+            else if ( SupportsFormat( DRM_FORMAT_ARGB8888, invalidOnly ) )
+                u8BitFormat = DRM_FORMAT_ARGB8888;
+            else if ( SupportsFormat( DRM_FORMAT_ABGR8888, invalidOnly ) )
+                u8BitFormat = DRM_FORMAT_ABGR8888;
+        }
 
         uint32_t u10BitFormat = DRM_FORMAT_INVALID;
-        if ( SupportsFormat( DRM_FORMAT_XBGR2101010 ) )
-            u10BitFormat = DRM_FORMAT_XBGR2101010;
-        else if ( SupportsFormat( DRM_FORMAT_XRGB2101010 ) )
-            u10BitFormat = DRM_FORMAT_XRGB2101010;
-        else if ( SupportsFormat( DRM_FORMAT_ABGR2101010 ) )
-            u10BitFormat = DRM_FORMAT_ABGR2101010;
-        else if ( SupportsFormat( DRM_FORMAT_ARGB2101010 ) )
-            u10BitFormat = DRM_FORMAT_ARGB2101010;
+        for (int i = 0; i < 2 && u10BitFormat == DRM_FORMAT_INVALID; i++)
+        {
+            bool invalidOnly = i == 0;
+            if ( SupportsFormat( DRM_FORMAT_XBGR2101010, invalidOnly ) )
+                u10BitFormat = DRM_FORMAT_XBGR2101010;
+            else if ( SupportsFormat( DRM_FORMAT_XRGB2101010, invalidOnly ) )
+                u10BitFormat = DRM_FORMAT_XRGB2101010;
+            else if ( SupportsFormat( DRM_FORMAT_ABGR2101010, invalidOnly ) )
+                u10BitFormat = DRM_FORMAT_ABGR2101010;
+            else if ( SupportsFormat( DRM_FORMAT_ARGB2101010, invalidOnly ) )
+                u10BitFormat = DRM_FORMAT_ARGB2101010;
+        }
 
         assert( u8BitFormat != DRM_FORMAT_INVALID );
 
@@ -2476,19 +2525,6 @@ namespace gamescope
         {
             m_pWPColorManager = (wp_color_manager_v1 *)wl_registry_bind( pRegistry, uName, &wp_color_manager_v1_interface, 1u );
             wp_color_manager_v1_add_listener( m_pWPColorManager, &s_WPColorManagerListener, this );
-
-            // HDR10.
-            {
-                wp_image_description_creator_params_v1 *pParams = wp_color_manager_v1_create_parametric_creator( m_pWPColorManager );
-                wp_image_description_creator_params_v1_set_primaries_named( pParams, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020 );
-                wp_image_description_creator_params_v1_set_tf_named( pParams, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ );
-                m_pWPImageDescriptions[ GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ ] = wp_image_description_creator_params_v1_create( pParams );
-            }
-
-            // scRGB
-            {
-                m_pWPImageDescriptions[ GAMESCOPE_APP_TEXTURE_COLORSPACE_SCRGB ] = wp_color_manager_v1_create_windows_scrgb( m_pWPColorManager );
-            }
         }
         else if ( !strcmp( pInterface, zwp_pointer_constraints_v1_interface.name ) )
         {
@@ -2687,6 +2723,54 @@ namespace gamescope
     void CWaylandBackend::Wayland_PrimarySelectionSource_Cancelled( struct zwp_primary_selection_source_v1 *pSource)
     {
         zwp_primary_selection_source_v1_destroy( pSource );
+    }
+
+    // Data Device
+
+    void CWaylandBackend::Wayland_DataDevice_Selection(wl_data_device *pDataDevice, wl_data_offer *pOffer) {
+        // An application has set the clipboard contents
+        if (pOffer == nullptr) {
+            // Clipboard is empty
+            m_pClipboard = nullptr;
+            gamescope_set_selection(std::string{}, GAMESCOPE_SELECTION_CLIPBOARD);
+            return;
+        }
+        
+        int fds[2];
+        if (pipe(fds) < 0) {
+            xdg_log.errorf("Failed to create pipe for clipboard data");
+            return;
+        }
+        
+        wl_data_offer_receive(pOffer, "text/plain", fds[1]);
+        close(fds[1]);
+
+        wl_display_roundtrip(m_pDisplay);
+
+        // Read the clipboard contents and store it in a member variable.
+        std::string clipboardData;
+        char buf[1024];
+        ssize_t n;
+        while ((n = read(fds[0], buf, sizeof(buf))) > 0) {
+            clipboardData.append(buf, n);
+        }
+        close(fds[0]);
+
+        m_pClipboard = std::make_shared<std::string>(clipboardData);
+
+        char *pClipBoard = m_pClipboard->data();
+        gamescope_set_selection( pClipBoard, GAMESCOPE_SELECTION_CLIPBOARD);
+
+        wl_data_offer_destroy(pOffer);
+    }
+    void CWaylandBackend::Wayland_DataDevice_DataOffer(struct wl_data_device *pDevice, struct wl_data_offer *pOffer) {
+        wl_data_offer_add_listener(pOffer, &s_DataOfferListener, nullptr);
+    }
+
+    // Data Offer
+    void CWaylandBackend::Wayland_DataOffer_Offer(struct wl_data_offer* pOffer, const char* pMime)
+    {
+        xdg_log.debugf("Clipboard supports MIME type: %s", pMime);
     }
 
     ///////////////////////
